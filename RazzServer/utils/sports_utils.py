@@ -293,10 +293,14 @@ def parse_event(event: dict) -> Optional[GameInfo]:
     return g
 def _event_popularity_score(event: dict) -> float:
     """
+    Heuristic "how interesting is this game" score. ESPN doesn't expose a
+    real popularity metric, so this combines a few reasonable signals:
       - live games >> completed >> upcoming
       - ranked teams involved (lower rank number = bigger bonus)
       - close score margin (nail-biters score higher than blowouts)
       - nationally televised games get a small bump
+    Tune the weights freely; nothing here is an ESPN-documented field
+    except curatedRank, broadcasts, and score, which are.
     """
     score = 0.0
     competitions = event.get("competitions") or [{}]
@@ -314,7 +318,7 @@ def _event_popularity_score(event: dict) -> float:
     point_scores = []
     for c in competitors:
         rank = (c.get("curatedRank") or {}).get("current")
-        if isinstance(rank, int) and 0 < rank < 99:  # ESPN uses 99 for "unranked"
+        if isinstance(rank, int) and 0 < rank < 99:
             ranks.append(rank)
         try:
             point_scores.append(int(c.get("score") or 0))
@@ -326,7 +330,7 @@ def _event_popularity_score(event: dict) -> float:
  
     if state == "in" and len(point_scores) == 2:
         margin = abs(point_scores[0] - point_scores[1])
-        score += max(0, 50 - margin)  
+        score += max(0, 30 - margin)
  
     networks = set()
     for b in comp.get("broadcasts") or []:
@@ -334,6 +338,10 @@ def _event_popularity_score(event: dict) -> float:
             networks.add(name.upper())
     if networks & SportsConfig.NATIONAL_NETWORKS:
         score += 50.0
+ 
+    attendance = comp.get("attendance") or 0
+    if isinstance(attendance, (int, float)) and attendance > 0:
+        score += min(attendance / 1000.0, 50.0)
  
     return score
 def espn_get_scoreboard(sport: Sport, dates: str, limit: int = 100,
