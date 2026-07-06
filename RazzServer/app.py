@@ -1,8 +1,8 @@
 from flask import Flask
-from config import Config
-app = Flask(__name__)
 from routers.sports import sports_bp
 
+
+app = Flask(__name__)
 app.register_blueprint(sports_bp, url_prefix='/api/sports')
 
 @app.route("/")

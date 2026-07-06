@@ -201,7 +201,7 @@ bool findLastBySingleDay(const Sport& s, int daysBack, struct tm g_today, GameIn
   for (int d = 1; d <= daysBack; d++) {
     struct tm day = addDays(g_today, -d);
     JsonDocument doc;
-    if (!espnGetScoreboard(s, fmtDate(day), doc, 100)) continue;
+    if (!(s, fmtDate(day), doc, 100)) continue;
     JsonArray events = doc["events"].as<JsonArray>();
     if (events.isNull() || events.size() == 0) continue;
     for (int i = (int)events.size() - 1; i >= 0; i--) {
@@ -230,91 +230,61 @@ bool findLastBySingleDay(const Sport& s, int daysBack, struct tm g_today, GameIn
 //  MAIN LOGIC
 // ═════════════════════════════════════════════════════════════════════════════
 
-void updateSportsData(bool forceRefresh) { 
-  // If you are currently ignoring forceRefresh, you can keep it that way,
-  // or add logic to use it (e.g., to reset timers).
-  
-  unsigned long now = millis();
-  
-  // Example: if forceRefresh is true, reset your trackers
-  if (forceRefresh) {
-    sportsFetchedCount = 0;
-    sportCheckIndex = 0;
-  }
+bool fetchScoreboardFromApi(GameInfo& out) {
+  WiFiClient client;
+  HTTPClient http;
+  http.setConnectTimeout(8000);
+  http.setTimeout(15000);
 
-  if (sportsFetchedCount >= NUM_SPORTS) {
-    if (now - lastSportsUpdate < 10000 && lastSportsUpdate != 0) return; // 10 second throttle
-    sportsFetchedCount = 0;
-    sportCheckIndex = 0;
-  }
+  String url = "http://192.168.1.112:5000/api/sports/get-scoreboard";
 
-  if (sportCheckIndex >= NUM_SPORTS) return;
+  if (!http.begin(client, url)) return false;
+  http.addHeader("Accept", "application/json");
 
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) return; 
-  
-  struct tm g_today = timeinfo;
-  g_today.tm_hour = 0;
-  g_today.tm_min  = 0;
-  g_today.tm_sec  = 0;
-  
-  int i = sportCheckIndex;
-  const Sport& s = SPORTS[i];
-  GameInfo& info = sportsGames[i];
-  
-  info.found = false;
-  info.nextFound = false;
-  info.lastFound = false;
+  int code = http.GET();
+  if (code != 200) { http.end(); return false; }
 
   JsonDocument doc;
-  
-  if (espnGetScoreboard(s, fmtDate(g_today), doc, 0)) {
-    JsonArray events = doc["events"].as<JsonArray>();
-    int idx = findTeamInEvents(events, s.teamAbbr);
-    if (idx >= 0 && parseEvent(events[idx].as<JsonObject>(), info)) {
-      info.found = true;
-    }
-  }
+  DeserializationError err = deserializeJson(doc, http.getStream());
+  http.end();
+  if (err) return false;
 
-  if (!info.found || info.state == "post") {
-    GameInfo nextInfo;
-    if (isNcaab(s)) {
-      if (findNextBySingleDay(s, 14, g_today, nextInfo)) {
-        info.nextFound = true;
-        info.nextHomeAbbr = nextInfo.homeAbbr;
-        info.nextAwayAbbr = nextInfo.awayAbbr;
-        info.nextDate = nextInfo.date.substring(5, 10);
-        info.nextStatusStr = nextInfo.statusStr;
-      }
-    } else {
-      String dateRange = fmtDate(addDays(g_today, 1)) + "-" + fmtDate(addDays(g_today, 7));
-      JsonDocument nextDoc;
-      if (espnGetScoreboard(s, dateRange, nextDoc, 100)) {
-        JsonArray events = nextDoc["events"].as<JsonArray>();
-        int idx = findTeamInEvents(events, s.teamAbbr);
-        if (idx >= 0 && parseEvent(events[idx].as<JsonObject>(), nextInfo)) {
-          info.nextFound = true;
-          info.nextHomeAbbr = nextInfo.homeAbbr;
-          info.nextAwayAbbr = nextInfo.awayAbbr;
-          info.nextDate = nextInfo.date.substring(5, 10);
-          info.nextStatusStr = nextInfo.statusStr;
-        }
-      }
-    }
-  }
+  if (!doc["found"]) return false;
 
-  GameInfo lastInfo;
-  int searchBack = isNcaab(s) ? 35 : 7;
-  if (findLastBySingleDay(s, searchBack, g_today, lastInfo)) {
-    info.lastFound = true;
-    info.lastHomeAbbr = lastInfo.homeAbbr;
-    info.lastAwayAbbr = lastInfo.awayAbbr;
-    info.lastHomeScore = lastInfo.homeScore;
-    info.lastAwayScore = lastInfo.awayScore;
-  }
+  JsonObject g = doc["game"];
+  out.found      = true;
+  out.homeAbbr   = g["home_abbr"]   | "???";
+  out.awayAbbr   = g["away_abbr"]   | "???";
+  out.homeScore  = g["home_score"]  | 0;
+  out.awayScore  = g["away_score"]  | 0;
+  out.state      = g["state"]       | "pre";
+  out.statusStr  = g["status_str"]  | "";
+  out.situation  = g["situation"]   | "";
+  out.startTime  = g["start_time"]  | "";
+  out.slogan     = g["slogan"]      | "";
 
-  sportCheckIndex++;
-  sportsFetchedCount = sportCheckIndex;
+  out.nextFound     = g["next_found"];
+  out.nextHomeAbbr  = g["next_home_abbr"] | "";
+  out.nextAwayAbbr  = g["next_away_abbr"] | "";
+  out.nextDate      = g["next_date"]      | "";
+
+  out.lastFound      = g["last_found"];
+  out.lastHomeAbbr   = g["last_home_abbr"] | "";
+  out.lastAwayAbbr   = g["last_away_abbr"] | "";
+  out.lastHomeScore  = g["last_home_score"] | 0;
+  out.lastAwayScore  = g["last_away_score"] | 0;
+
+  return true;
+}
+
+void updateSportsData(bool forceRefresh) {
+  unsigned long now = millis();
+  if (!forceRefresh && (now - lastSportsUpdate < 10000) && lastSportsUpdate != 0) return;
+
+  GameInfo info;
+  if (fetchScoreboardFromApi(info)) {
+    sportsGames[0] = info; 
+  }
   lastSportsUpdate = now;
 }
 
