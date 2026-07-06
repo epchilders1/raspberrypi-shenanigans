@@ -274,8 +274,7 @@ void programSports() {
   displayOn = true;
   display->setBrightness8(90);
   lastSportsUpdate = 0;    // Force immediate fetch next loop cycle
-  sportsFetchedCount = 0;  // Reset so webpage waits for all 6 sports to re-fetch
-  sportCheckIndex = 0;     // Start from the first sport again
+  sportsFetchedCount = 0;  // Reset so webpage waits for the re-fetch to land
   server.send(200, "application/json", "{\"status\":\"Sports active\"}");
 }
 

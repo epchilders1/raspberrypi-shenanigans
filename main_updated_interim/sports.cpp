@@ -7,226 +7,6 @@
 const char* ESPN_BASE  = "http://site.api.espn.com/apis/site/v2/sports";
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  HELPER FUNCTIONS
-// ═════════════════════════════════════════════════════════════════════════════
-
-bool isNcaab(const Sport& s) { return strcmp(s.label, "NCAAB") == 0; }
-
-String fmtDate(const struct tm& t) {
-  char buf[9];
-  strftime(buf, sizeof(buf), "%Y%m%d", &t);
-  return String(buf);
-}
-
-struct tm addDays(struct tm base, int days) {
-  time_t tt = mktime(&base);
-  tt += (time_t)days * 86400;
-  struct tm out;
-  localtime_r(&tt, &out);
-  return out;
-}
-
-// Logic for team-specific slogans based on abbreviations
-String getTeamSlogan(String abbr) {
-  if (abbr == "ALA") return "ROLL TIDE";
-  if (abbr == "SEA") return "GO SEAHAWKS"; // Default Seattle slogan
-  return "GO TEAM!";
-}
-
-JsonDocument buildFilter() {
-  JsonDocument f;
-  JsonObject ev   = f["events"][0].to<JsonObject>();
-  ev["date"]      = true;
-  ev["shortName"] = true;
-  JsonObject comp = ev["competitions"][0].to<JsonObject>();
-  
-  // Added situation for outs/downs
-  comp["situation"]["downDistanceText"] = true;
-  comp["situation"]["outs"]             = true;
-
-  JsonObject c0   = comp["competitors"][0].to<JsonObject>();
-  JsonObject c1   = comp["competitors"][1].to<JsonObject>();
-  c0["team"]["abbreviation"] = true;
-  c0["team"]["displayName"]  = true;
-  c0["team"]["homeAway"]     = true;
-  c0["score"]                = true;
-  c1["team"]["abbreviation"] = true;
-  c1["team"]["displayName"]  = true;
-  c1["team"]["homeAway"]     = true;
-  c1["score"]                = true;
-  
-  JsonObject st = comp["status"].to<JsonObject>();
-  st["displayClock"]        = true;
-  st["period"]              = true;
-  st["type"]["state"]       = true;
-  st["type"]["shortDetail"] = true;
-  return f;
-}
-
-bool espnGetScoreboard(const Sport& s, const String& dates, JsonDocument& doc, int limit = 100) {
-  String url = String(ESPN_BASE) + "/" + s.path + "/scoreboard?dates=" + dates;
-  if (isNcaab(s)) {
-    url += "&groups=50";
-    if (limit < 200) limit = 200;
-  }
-  if (limit > 0) url += "&limit=" + String(limit);
-
-  for (int attempt = 0; attempt < 2; attempt++) {
-    WiFiClient client;
-    HTTPClient http;
-    http.useHTTP10(true);
-    http.setReuse(false);
-    http.setConnectTimeout(8000);
-    http.setTimeout(15000);
-
-    if (!http.begin(client, url)) continue;
-    http.addHeader("Accept", "application/json");
-    http.addHeader("Accept-Encoding", "identity");
-
-    int code = http.GET();
-    if (code <= 0 || code != 200) { http.end(); delay(250); continue; }
-
-    doc.clear();
-    JsonDocument filter = buildFilter();
-    DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(25));
-    http.end();
-
-    if (!err) return true;
-    delay(250);
-  }
-  return false;
-}
-
-bool parseEvent(JsonObject event, GameInfo& out) {
-  JsonObject comp = event["competitions"][0];
-  if (comp.isNull()) return false;
-  JsonArray competitors = comp["competitors"].as<JsonArray>();
-  JsonObject st = comp["status"];
-  if (competitors.isNull() || competitors.size() < 2 || st.isNull()) return false;
-
-  JsonObject home, away;
-  for (JsonObject c : competitors) {
-    String ha = c["team"]["homeAway"] | c["homeAway"] | "";
-    if (ha == "home") home = c;
-    else if (ha == "away") away = c;
-  }
-  if (home.isNull()) home = competitors[0];
-  if (away.isNull()) away = competitors[1];
-
-  out.homeAbbr  = home["team"]["abbreviation"] | "???";
-  out.awayAbbr  = away["team"]["abbreviation"] | "???";
-  out.homeName  = home["team"]["displayName"]  | "?";
-  out.awayName  = away["team"]["displayName"]  | "?";
-  out.homeScore = String(home["score"] | "0").toInt();
-  out.awayScore = String(away["score"] | "0").toInt();
-  out.state     = st["type"]["state"] | "pre";
-  out.date      = event["date"] | "";
-  out.shortName = event["shortName"] | "";
-
-  // 1. Slogan Logic
-  out.slogan = getTeamSlogan(out.homeAbbr == "ALA" || out.awayAbbr == "ALA" ? "ALA" : "SEA");
-
-  // 2. Start Time Parsing (UTC to Local - assumes -6 for Alabama)
-  String rawDate = event["date"] | "";
-  if (rawDate.length() > 16) {
-    int hour = rawDate.substring(11, 13).toInt();
-    int min  = rawDate.substring(14, 16).toInt();
-    hour = (hour + 18) % 24; // Simple UTC-6 conversion
-    String ampm = (hour >= 12) ? "PM" : "AM";
-    int dHour = (hour % 12 == 0) ? 12 : hour % 12;
-    out.startTime = String(dHour) + ":" + (min < 10 ? "0" : "") + String(min) + ampm;
-  }
-
-  // 3. Situation Logic (Downs/Outs)
-  out.situation = "";
-  if (out.state == "in" && !comp["situation"].isNull()) {
-    String downDist = comp["situation"]["downDistanceText"] | "";
-    if (downDist != "" && downDist != "null") {
-      out.situation = downDist;
-    } else {
-      int outs = comp["situation"]["outs"] | -1;
-      if (outs != -1) out.situation = String(outs) + " OUTS";
-    }
-  }
-
-  String shortDetail = st["type"]["shortDetail"] | "";
-  String clock       = st["displayClock"] | "";
-  int    period      = st["period"] | 0;
-
-  if (out.state == "post") {
-    out.statusStr = "FINAL";
-    if (out.endTime == 0) out.endTime = millis();
-  } else {
-    out.endTime = 0; // Reset if game is active or pre
-    if (out.state == "in") {
-      out.statusStr = shortDetail.length() ? shortDetail.substring(0, 8) : ("P" + String(period) + " " + clock);
-    } else {
-      out.statusStr = shortDetail.length() ? shortDetail : "PRE";
-    }
-  }
-  return true;
-}
-
-int findTeamInEvents(JsonArray events, const char* abbr) {
-  String target = String(abbr);
-  target.toUpperCase();
-  for (int i = 0; i < (int)events.size(); i++) {
-    JsonObject comp = events[i]["competitions"][0];
-    if (comp.isNull()) continue;
-    JsonArray competitors = comp["competitors"].as<JsonArray>();
-    if (competitors.isNull()) continue;
-    for (JsonObject c : competitors) {
-      String a = c["team"]["abbreviation"] | "";
-      a.toUpperCase();
-      if (a == target) return i;
-    }
-  }
-  return -1;
-}
-
-bool findNextBySingleDay(const Sport& s, int daysAhead, struct tm g_today, GameInfo& out) {
-  for (int d = 1; d <= daysAhead; d++) {
-    struct tm day = addDays(g_today, d);
-    JsonDocument doc;
-    if (!espnGetScoreboard(s, fmtDate(day), doc, 100)) continue;
-    JsonArray events = doc["events"].as<JsonArray>();
-    if (events.isNull() || events.size() == 0) continue;
-    int idx = findTeamInEvents(events, s.teamAbbr);
-    if (idx >= 0 && parseEvent(events[idx].as<JsonObject>(), out)) return true;
-  }
-  return false;
-}
-
-bool findLastBySingleDay(const Sport& s, int daysBack, struct tm g_today, GameInfo& out) {
-  for (int d = 1; d <= daysBack; d++) {
-    struct tm day = addDays(g_today, -d);
-    JsonDocument doc;
-    if (!(s, fmtDate(day), doc, 100)) continue;
-    JsonArray events = doc["events"].as<JsonArray>();
-    if (events.isNull() || events.size() == 0) continue;
-    for (int i = (int)events.size() - 1; i >= 0; i--) {
-      JsonObject ev = events[i].as<JsonObject>();
-      JsonArray competitors = ev["competitions"][0]["competitors"].as<JsonArray>();
-      if (competitors.isNull()) continue;
-      bool hasTeam = false;
-      for (JsonObject c : competitors) {
-        String a = c["team"]["abbreviation"] | "";
-        a.toUpperCase();
-        String t = String(s.teamAbbr);
-        t.toUpperCase();
-        if (a == t) { hasTeam = true; break; }
-      }
-      if (!hasTeam) continue;
-      String state = ev["competitions"][0]["status"]["type"]["state"] | "";
-      if (state != "post") continue;
-      if (parseEvent(ev, out)) return true;
-    }
-  }
-  return false;
-}
-
-
-// ═════════════════════════════════════════════════════════════════════════════
 //  MAIN LOGIC
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -283,7 +63,11 @@ void updateSportsData(bool forceRefresh) {
 
   GameInfo info;
   if (fetchScoreboardFromApi(info)) {
-    sportsGames[0] = info; 
+    if (info.state == "post") {
+      info.endTime = (sportsGames[0].state == "post") ? sportsGames[0].endTime : now;
+    }
+    sportsGames[0] = info;
+    sportsFetchedCount = 1;
   }
   lastSportsUpdate = now;
 }
@@ -382,7 +166,7 @@ void displaySports() {
 
 String sportsDataJson() {
   JsonDocument doc;
-  doc["ready"] = (sportsFetchedCount >= NUM_SPORTS);
+  doc["ready"] = (sportsFetchedCount >= 1);
   doc["fetched"] = sportsFetchedCount;
   
   JsonArray gamesArr = doc["games"].to<JsonArray>();
